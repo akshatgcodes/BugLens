@@ -1,0 +1,40 @@
+[project]
+name = "buglens"
+version = "0.1.0"
+description = "Code review that runs static rules first, then streams an LLM review with a suggested fix"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.2",
+    "pydantic-settings>=2.3",
+    "itsdangerous>=2.2",
+    "langchain-core>=0.3",
+    "langchain-openai>=0.2",
+]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6", "httpx>=0.27"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection markers are meant to sit in argument defaults
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Cookie"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
+"tests/samples.py" = ["E501", "W291"]
