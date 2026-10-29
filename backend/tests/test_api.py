@@ -111,6 +111,13 @@ def test_model_failure_keeps_what_arrived(owner, monkeypatch):
     assert report["status"] == "partial" and len(report["issues"]) == 3
 
 
+def test_a_cut_off_reply_is_reported(owner, fake_llm):
+    fake_llm(REPLY[:150], finish="length")
+    ev = events(owner.post("/api/analyze", json={"code": CODE}))
+    assert [k for k, _ in ev] == ["meta", "static", "ai_start", "notice", "fixed", "done"]
+    assert "ran out of output tokens" in ev[3][1]["message"] and ev[-1][1]["status"] == "partial"
+
+
 def test_language_detection_and_choice(owner, fake_llm):
     fake_llm("")
     ev = events(owner.post("/api/analyze", json={"code": "var a = 1;", "filename": "a.js"}))

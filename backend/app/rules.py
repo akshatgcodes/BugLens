@@ -591,14 +591,33 @@ def find(code: str, language: str) -> list[Finding]:
     return out
 
 
-def insert_imports(code: str, needed: list[str], language: str) -> str:
+@dataclass(frozen=True)
+class Shift:
+    """k lines inserted after original line `at`. Maps line numbers both ways."""
+
+    at: int = 0
+    k: int = 0
+
+    def to_new(self, n: int) -> int:
+        return n + self.k if n > self.at else n
+
+    def to_old(self, n: int) -> int:
+        if n <= self.at:
+            return n
+        return max(n - self.k, self.at + 1)  # an inserted line maps to the one after it
+
+
+NO_SHIFT = Shift()
+
+
+def insert_imports(code: str, needed: list[str], language: str) -> tuple[str, Shift]:
     if language != "python" or not needed:
-        return code
+        return code, NO_SHIFT
     lines = code.split("\n")
     present = {ln.strip() for ln in lines}
     missing = sorted(imp for imp in set(needed) if imp not in present)
     if not missing:
-        return code
+        return code, NO_SHIFT
     at = next((i for i, ln in enumerate(lines) if re.match(r"(import|from)\s", ln)), None)
     if at is None:
         at = 0
@@ -614,14 +633,14 @@ def insert_imports(code: str, needed: list[str], language: str) -> str:
                 else next((i for i in range(at + 1, len(lines)) if q in lines[i]), at)
             )
             at = end + 1
-    return "\n".join(lines[:at] + missing + lines[at:])
+    return "\n".join(lines[:at] + missing + lines[at:]), Shift(at, len(missing))
 
 
 def apply_fixes(code: str, findings: list[Finding], language: str) -> tuple[str, list[str]]:
     """The source with every non-overlapping rule fix applied, and the imports they need.
 
-    Fixes stay within their lines, so line numbers don't move; imports are added at the
-    very end (insert_imports), after the model's fixes, for the same reason.
+    Fixes stay within their lines, so line numbers don't move. Imports are added
+    separately by insert_imports, which says how the lines shifted.
     """
     out, pos, needed = [], 0, []
     for f in sorted((f for f in findings if f.replacement is not None), key=lambda f: f.start):

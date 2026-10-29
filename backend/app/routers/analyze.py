@@ -62,7 +62,8 @@ def analyze(body: AnalyzeIn) -> StreamingResponse:
         found = rules.find(code, language)
         static = [f.to_dict(i, code) for i, f in enumerate(found, 1)]
         rule_fixed, imports = rules.apply_fixes(code, found, language)
-        fixed = rules.insert_imports(rule_fixed, imports, language)
+        fixed, shift = rules.insert_imports(rule_fixed, imports, language)
+        reviewed = fixed  # the model reviews the code with the rule fixes in place
         ai_issues: list[dict] = []
         finished = False
         try:
@@ -84,9 +85,7 @@ def analyze(body: AnalyzeIn) -> StreamingResponse:
             else:
                 yield sse("ai_start", {})
                 try:
-                    for kind, data in review.run(
-                        rule_fixed, language, body.filename, static, imports
-                    ):
+                    for kind, data in review.run(reviewed, language, body.filename, static, shift):
                         if kind == "issue":
                             ai_issues.append(data)
                             yield sse("issue", data)
@@ -95,9 +94,11 @@ def analyze(body: AnalyzeIn) -> StreamingResponse:
                                 if item["id"] == data["id"]:
                                     item["fixable"], item["patch"] = True, data["patch"]
                             yield sse("static_fix", data)
+                        elif kind == "warning":
+                            state["status"], state["error"] = "partial", data
+                            yield sse("notice", {"message": data})
                         elif data is not None:
-                            fixed = rules.insert_imports(data, imports, language)
-                            state["fixed_source"] = "model"
+                            fixed, state["fixed_source"] = data, "model"
                 except review.ReviewError as e:
                     state["status"], state["error"] = "partial", str(e)
                     yield sse("notice", {"message": str(e)})

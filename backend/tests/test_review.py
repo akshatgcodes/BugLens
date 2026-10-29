@@ -3,6 +3,7 @@ import json
 import pytest
 
 from app.review import ReviewStream, apply_patch
+from app.rules import Shift
 
 CODE = "def f(x):\n    if x:\n        return 1 / x\n    return 0\n"
 
@@ -51,13 +52,61 @@ def test_bad_lines_are_skipped_not_fatal():
     )
     s, events = run(reply, 9)
     assert [(e["severity"], e["category"]) for _, e in events] == [("warning", "bug")]
-    assert s.skipped == 6
+    assert s.skipped == 4  # the prose and the array aren't objects, so they're just ignored
+
+
+@pytest.mark.parametrize("size", [1, 4, 1000])
+def test_objects_in_any_layout(size):
+    pretty = json.dumps(json.loads(issue(title="Pretty")), indent=2)
+    reply = (
+        "[\n"
+        + pretty
+        + ",\n"
+        + issue(title="In an array")
+        + "\n]\n"
+        + issue(title='Braces { in } "strings"', explanation="a \\ b }")
+        + "}}\n"
+        + '{"line": 2, "title": "cut off'
+    )
+    s, events = run(reply, size)
+    assert [e["title"] for _, e in events] == ["Pretty", "In an array", 'Braces { in } "strings"']
+    assert s.skipped == 1  # the cut-off object at the end
 
 
 def test_findings_the_rules_already_made_are_dropped():
     static = [{"id": "r1", "line": 3, "category": "bug", "fixable": True}]
     _, events = run(issue() + "\n" + issue(category="performance", title="Slow"), 4, static)
     assert [e["title"] for _, e in events] == ["Slow"]
+
+
+def test_a_repeated_finding_with_a_fix_becomes_the_rules_fix():
+    static = [{"id": "r1", "line": 3, "category": "bug", "fixable": False}]
+    fix = {"find": "        return 1 / x", "replace": "        return 1 / x if x else 0"}
+    s, events = run(issue(**fix) + "\n" + issue(**fix, title="Again") + "\n", 5, static)
+    assert events == [
+        ("static_fix", {"id": "r1", "patch": {"before": fix["find"], "after": fix["replace"]}})
+    ]
+    assert s.issues == [] and s.applied == 1
+
+
+def test_a_repeat_covering_the_rules_line_counts_too():
+    static = [
+        {"id": "r1", "line": 3, "category": "security", "fixable": True},
+        {"id": "r2", "line": 3, "category": "security", "fixable": False},
+    ]
+    fix = {"find": "    if x:\n        return 1 / x", "replace": "    if x:\n        return x"}
+    _, events = run(issue(line=2, end_line=3, category="security", **fix) + "\n", 8, static)
+    assert [(k, e["id"]) for k, e in events] == [("static_fix", "r2")]
+
+
+def test_line_numbers_are_mapped_back_to_the_submitted_code():
+    code = "import os\n" + CODE  # one import line inserted above line 1 of CODE
+    static = [{"id": "r1", "line": 3, "category": "security", "fixable": True}]
+    s = ReviewStream(code, static, limit=15, shift=Shift(at=0, k=1))
+    ((kind, e),) = s.feed(issue(line=4, end_line=5) + "\n")
+    assert (e["line"], e["end_line"]) == (3, 4)
+    # Same line and category as the static finding once mapped back: dropped
+    assert s.feed(issue(line=4, category="security", title="Dup") + "\n") == []
 
 
 def test_limit():

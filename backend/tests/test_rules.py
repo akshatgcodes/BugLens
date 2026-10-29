@@ -10,7 +10,7 @@ def ids(code: str, lang: str) -> list[str]:
 
 def fixed(code: str, lang: str) -> str:
     text, imports = rules.apply_fixes(code, rules.find(code, lang), lang)
-    return rules.insert_imports(text, imports, lang)
+    return rules.insert_imports(text, imports, lang)[0]
 
 
 # (language, code, rule that must fire, or None for "nothing fires")
@@ -131,6 +131,15 @@ def test_fixes_keep_line_numbers_and_add_imports_last():
     assert fixed(code, "python") == (
         '"""Module doc."""\nimport ast\nimport os\n\nAPI_KEY = os.environ["API_KEY"]\nx = ast.literal_eval(s)\n'
     )
+
+
+def test_shift_maps_lines_both_ways():
+    code = '"""Doc."""\nx = eval(s)\ny = 1\n'
+    text, imports = rules.apply_fixes(code, rules.find(code, "python"), "python")
+    out, shift = rules.insert_imports(text, imports, "python")
+    assert out.split("\n")[1] == "import ast" and shift == rules.Shift(at=1, k=1)
+    assert [shift.to_new(n) for n in (1, 2, 3)] == [1, 3, 4]
+    assert [shift.to_old(n) for n in (1, 2, 3, 4)] == [1, 2, 2, 3]
 
 
 def test_imports_go_before_existing_imports_and_are_not_duplicated():

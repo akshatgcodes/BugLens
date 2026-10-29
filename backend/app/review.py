@@ -1,6 +1,6 @@
 """The model's half of the review: issues the rules can't see, each with a local fix.
 
-The model answers with one JSON object per line, so issues can be shown while it's still
+The model answers with one JSON object per issue, so issues can be shown while it's still
 typing (a single JSON document would only parse at the very end):
 
     {"line": 12, "severity": "warning", ..., "find": "<exact lines>", "replace": "<fixed>"}
@@ -20,7 +20,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.config import settings
 from app.languages import LANGUAGES
-from app.rules import CATEGORIES, SEVERITIES
+from app.rules import CATEGORIES, NO_SHIFT, SEVERITIES, Shift
 
 SYSTEM = """You are a senior engineer doing a careful code review.
 
@@ -39,7 +39,7 @@ line-number prefix), as few as needed and unique in the file. replace: the same 
 corrected, keeping the indentation. Use \\n between lines. Leave both out if the fix \
 isn't local.
 - If a fix needs a new import, put it in that issue's find/replace by extending an \
-existing import line.
+existing import line. Imports the static fixes need are already in the listing.
 - Look for what pattern matching can't see: logic errors, unhandled edge cases (empty \
 input, None/null, division by zero, off-by-one), missing error handling, race \
 conditions, injection and XSS through indirect paths, resource leaks, slow loops.
@@ -54,29 +54,36 @@ def chat_model() -> BaseChatModel:
     from langchain_openai import ChatOpenAI
 
     base_url, model, key = settings.llm
+    extra = (
+        {"reasoning_effort": settings.llm_reasoning_effort} if settings.llm_reasoning_effort else {}
+    )
     return ChatOpenAI(
-        base_url=base_url, model=model, api_key=key, temperature=0.1, timeout=120, streaming=True
+        base_url=base_url,
+        model=model,
+        api_key=key,
+        temperature=0.1,
+        timeout=120,
+        max_tokens=settings.llm_max_tokens,
+        streaming=True,
+        **extra,
     )
 
 
-def prompt(
-    code: str, language: str, filename: str | None, static: list[dict], imports: list[str]
-) -> str:
+def prompt(code: str, language: str, filename: str | None, static: list[dict], shift: Shift) -> str:
     numbered = "\n".join(f"{i:>4} | {line}" for i, line in enumerate(code.split("\n"), 1))
     found = (
         "\n".join(
-            f"- {s['id']} line {s['line']}: {s['title']} "
+            f"- {s['id']} line {shift.to_new(s['line'])}: {s['title']} "
             f"({'fixed' if s['fixable'] else 'needs a fix'})"
             for s in static
         )
         or "- none"
     )
-    extra = f"\nThese imports will be added for the fixes: {', '.join(imports)}" if imports else ""
     name = f" ({filename})" if filename else ""
     return (
         f"Language: {LANGUAGES.get(language, language)}{name}\n"
         f"Report at most {settings.max_ai_issues} issues.\n\n"
-        f"Static checks already reported:\n{found}{extra}\n\n"
+        f"Static checks already reported:\n{found}\n\n"
         f"Code:\n{numbered}"
     )
 
@@ -161,67 +168,115 @@ def _text(value, limit: int) -> str:
     return str(value or "").translate(TYPOGRAPHY).strip()[:limit]
 
 
-class ReviewStream:
-    """Turns streamed model text into validated issues, applying each fix as it arrives."""
+class ObjectScanner:
+    """Pulls complete top-level {...} objects out of streamed text.
 
-    def __init__(self, code: str, static: list[dict], limit: int):
+    Asked for one object per line, models still sometimes pretty-print them over several
+    lines, wrap them in an array or fences, or add a stray brace. Tracking brace depth
+    (outside strings) copes with all of that, and still yields each object as soon as
+    its closing brace arrives.
+    """
+
+    def __init__(self):
+        self.buf: list[str] = []
+        self.depth = 0
+        self.in_string = False
+        self.escaped = False
+
+    def feed(self, text: str) -> list[str]:
+        out = []
+        for ch in text:
+            if self.depth == 0:
+                if ch == "{":
+                    self.depth, self.buf = 1, ["{"]
+                continue
+            self.buf.append(ch)
+            if self.in_string:
+                if self.escaped:
+                    self.escaped = False
+                elif ch == "\\":
+                    self.escaped = True
+                elif ch == '"':
+                    self.in_string = False
+            elif ch == '"':
+                self.in_string = True
+            elif ch == "{":
+                self.depth += 1
+            elif ch == "}":
+                self.depth -= 1
+                if self.depth == 0:
+                    out.append("".join(self.buf))
+        return out
+
+    def pending(self) -> bool:
+        return self.depth > 0
+
+
+class ReviewStream:
+    """Turns streamed model text into validated issues, applying each fix as it arrives.
+
+    The model sees the code after rule fixes and their imports; `shift` maps its line
+    numbers back to the code the user submitted.
+    """
+
+    def __init__(self, code: str, static: list[dict], limit: int, shift: Shift = NO_SHIFT):
         self.code = code
+        self.shift = shift
         self.n_lines = len(code.split("\n"))
         self.limit = limit
-        self.static = {(s["line"], s["category"]) for s in static}
         self.unfixed = {s["id"] for s in static if not s["fixable"]}
+        # (line, category, id), ones that still need a fix first so a repeat lands there
+        self.static = sorted(
+            ((s["line"], s["category"], s["id"]) for s in static),
+            key=lambda t: t[2] not in self.unfixed,
+        )
         self.issues: list[dict] = []
         self.skipped = 0
         self.applied = 0
-        self.buf = ""
+        self.objects = ObjectScanner()
 
     def feed(self, text: str) -> list[tuple[str, dict]]:
-        self.buf += text
-        out = []
-        while "\n" in self.buf:
-            line, self.buf = self.buf.split("\n", 1)
-            out += self._line(line)
-        return out
+        return [e for obj in self.objects.feed(text) if (e := self._object(obj))]
 
     def close(self) -> list[tuple[str, dict]]:
-        rest, self.buf = self.buf, ""
-        return self._line(rest)
+        if self.objects.pending():
+            self.skipped += 1  # cut off mid-object
+        return []
 
-    def _line(self, raw: str) -> list[tuple[str, dict]]:
-        s = raw.strip()
-        if not s or s.startswith("```"):
-            return []
+    def _object(self, raw: str) -> tuple[str, dict] | None:
         try:
-            data = json.loads(s)
+            data = json.loads(raw)
         except json.JSONDecodeError:
             self.skipped += 1
-            return []
-        if isinstance(data, dict) and "fix_for" in data:
-            fix = self._static_fix(data)
-            return [("static_fix", fix)] if fix else []
-        issue = self._validate(data) if isinstance(data, dict) else None
-        if issue is None:
+            return None
+        event = self._handle(data) if isinstance(data, dict) else None
+        if event is None:
             self.skipped += 1
-            return []
-        self.issues.append(issue)
-        return [("issue", issue)]
+        return event
 
-    def _static_fix(self, d: dict) -> dict | None:
-        """A fix for a rule finding the rules couldn't fix themselves."""
-        rid = d.get("fix_for")
-        if rid not in self.unfixed or not isinstance(d.get("find"), str):
-            self.skipped += 1
+    def _patch(self, d: dict) -> dict | None:
+        if not isinstance(d.get("find"), str):
             return None
         result = apply_patch(self.code, d["find"], str(d.get("replace") or ""))
         if not result:
-            self.skipped += 1
             return None
         self.code, patch = result
-        self.unfixed.discard(rid)
         self.applied += 1
-        return {"id": rid, "patch": patch}
+        return patch
 
-    def _validate(self, d: dict) -> dict | None:
+    def _static_fix(self, rid: str, d: dict) -> tuple[str, dict] | None:
+        """A fix for a rule finding the rules couldn't fix themselves."""
+        if rid not in self.unfixed:
+            return None
+        patch = self._patch(d)
+        if not patch:
+            return None
+        self.unfixed.discard(rid)
+        return "static_fix", {"id": rid, "patch": patch}
+
+    def _handle(self, d: dict) -> tuple[str, dict] | None:
+        if "fix_for" in d:
+            return self._static_fix(str(d["fix_for"]), d)
         if len(self.issues) >= self.limit:
             return None
         try:
@@ -231,6 +286,7 @@ class ReviewStream:
             return None
         if not 1 <= line <= self.n_lines:
             return None  # points outside the code: made up
+        line, end = self.shift.to_old(line), self.shift.to_old(min(max(end, line), self.n_lines))
         title = _text(d.get("title"), 120)
         if not title:
             return None
@@ -242,24 +298,23 @@ class ReviewStream:
             category = "bug"
         if severity not in SEVERITIES:
             severity = "warning"
-        if (line, category) in self.static:
-            return None  # the rules already said this
+        end = max(end, line)
+        rid = next((i for n, c, i in self.static if c == category and line <= n <= end), None)
+        if rid:
+            # The rules already said this. Models repeat findings even when told not to,
+            # often with the fix the rule couldn't make, so keep the fix and drop the rest.
+            return self._static_fix(rid, d)
         if any(i["line"] == line and i["title"].lower() == title.lower() for i in self.issues):
             return None
-        patch = None
-        if isinstance(d.get("find"), str) and isinstance(d.get("replace"), str):
-            result = apply_patch(self.code, d["find"], d["replace"])
-            if result:
-                self.code, patch = result
-                self.applied += 1
-        return {
+        patch = self._patch(d)
+        issue = {
             "id": f"a{len(self.issues) + 1}",
             "source": "ai",
             "rule_id": None,
             "severity": severity,
             "category": category,
             "line": line,
-            "end_line": min(max(end, line), self.n_lines),
+            "end_line": end,
             "title": title,
             "explanation": _text(d.get("explanation"), 1000),
             "suggestion": _text(d.get("suggestion"), 500),
@@ -267,6 +322,8 @@ class ReviewStream:
             "fixable": patch is not None,
             "patch": patch,
         }
+        self.issues.append(issue)
+        return "issue", issue
 
 
 class ReviewError(Exception):
@@ -274,21 +331,27 @@ class ReviewError(Exception):
 
 
 def run(
-    code: str, language: str, filename: str | None, static: list[dict], imports: list[str]
+    code: str, language: str, filename: str | None, static: list[dict], shift: Shift = NO_SHIFT
 ) -> Iterator[tuple[str, object]]:
-    """Reviews `code` (rule fixes already applied). Yields ("issue", dict) and
-    ("static_fix", {id, patch}) as they arrive, then ("fixed", str) with every fix that
-    applied cleanly, or None if none did."""
-    stream = ReviewStream(code, static, settings.max_ai_issues)
+    """Reviews `code` (rule fixes and their imports already applied). Yields
+    ("issue", dict) and ("static_fix", {id, patch}) as they arrive, ("warning", str) if
+    the reply was cut off, then ("fixed", str) with every fix that applied cleanly, or
+    ("fixed", None) if none did."""
+    stream = ReviewStream(code, static, settings.max_ai_issues, shift)
     messages = [
         SystemMessage(SYSTEM),
-        HumanMessage(prompt(code, language, filename, static, imports)),
+        HumanMessage(prompt(code, language, filename, static, shift)),
     ]
+    cut_off = False
     try:
         for chunk in chat_model().stream(messages):
             text = chunk.content if isinstance(chunk.content, str) else ""
             yield from stream.feed(text)
+            meta = getattr(chunk, "response_metadata", None) or {}
+            cut_off = cut_off or meta.get("finish_reason") == "length"
     except Exception as e:
         raise ReviewError(f"The model call failed: {str(e)[:300]}") from e
     yield from stream.close()
+    if cut_off:
+        yield "warning", "The model ran out of output tokens, so the AI review may be incomplete."
     yield "fixed", stream.code if stream.applied else None

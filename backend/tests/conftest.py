@@ -23,8 +23,10 @@ from app.main import app  # noqa: E402
 class FakeStreamingChat:
     """Streams a canned reply in small, awkwardly sized pieces, like a real model."""
 
-    def __init__(self, reply: str, size: int = 7, error: Exception | None = None):
-        self.reply, self.size, self.error = reply, size, error
+    def __init__(
+        self, reply: str, size: int = 7, error: Exception | None = None, finish: str = "stop"
+    ):
+        self.reply, self.size, self.error, self.finish = reply, size, error, finish
         self.calls: list = []
 
     def stream(self, messages):
@@ -33,6 +35,7 @@ class FakeStreamingChat:
             yield AIMessageChunk(content=self.reply[i : i + self.size])
         if self.error:
             raise self.error
+        yield AIMessageChunk(content="", response_metadata={"finish_reason": self.finish})
 
 
 @pytest.fixture
