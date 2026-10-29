@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     llm_base_url: str = ""  # defaults to the provider's endpoint
     llm_model: str = ""  # defaults to the provider's model above
     groq_api_key: str = ""  # accepted as an alias for llm_api_key
+    # Reasoning models (gpt-oss) spend much of this on thinking before the first issue;
+    # at the provider default of ~8k, some reviews were cut off before any output
+    llm_max_tokens: int = 16_000
+    llm_reasoning_effort: str = ""  # low · medium · high for reasoning models; empty = default
 
     # Roughly 1,000 lines of code; keeps one review inside the model's context and quick
     max_chars: int = 40_000
