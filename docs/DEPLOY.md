@@ -1,28 +1,33 @@
 # Deploy
 
-BugLens is **not deployed yet**. This is the intended setup.
+Live at **https://buglens.akshatgcodes.in**: one Vercel project, connected to this repo, so every push to `main` deploys (Dependabot branches are skipped by `ignoreCommand`).
 
-| Part | Platform |
+| Path | Served by |
 |---|---|
-| Frontend | Vercel (`frontend/`, build `npm run build`, output `dist`, SPA rewrite to `index.html`) |
-| API | Any Python host (e.g. Render), `uvicorn app.main:app --host 0.0.0.0 --port $PORT` |
-| Database | Postgres (e.g. Neon) through `DATABASE_URL`, so reports survive restarts on hosts without a persistent disk |
-| Model | Groq |
+| `/` | the landing page (`landing/`, a Next.js static export) |
+| `/app/` | the React app (`frontend/`, built with `VITE_BASE=/app/`) |
+| `/api/…`, `/health` | FastAPI as a Python function (`index.py` imports `backend/app/main.py`) |
 
-The API is light: there's no local model. A local run sat at about 116 MB of memory after several reviews.
+`vercel.json` holds the builds and routes. Vercel's Python runtime installs from `requirements.txt` at the root, which is exported from `backend/uv.lock`:
 
-Streaming needs the proxy in front of the API not to buffer responses. The API sets `Cache-Control: no-cache` and `X-Accel-Buffering: no`; if events arrive all at once at the end, buffering is the cause.
+```bash
+cd backend && uv export --no-dev --no-hashes --no-emit-project -o ../requirements.txt
+```
+
+The database is Neon Postgres (free tier, Singapore). The app and API share one origin, so the session cookie needs no cross-site settings.
 
 ## Environment
 
-On the API:
+Set in the Vercel project, production:
 
-- `APP_PASSWORD` (strong) and `SESSION_SECRET` (long random)
-- `LLM_PROVIDER=groq`, `LLM_API_KEY`
-- `DATABASE_URL=postgresql+psycopg://…`
-- `FRONTEND_URL=https://<frontend-host>`, `CROSS_SITE_COOKIES=true`
+- `DATABASE_URL`: Neon connection string (`postgresql+psycopg://…`, pooled), so reports survive between function instances
+- `SESSION_SECRET`: long random value
+- `APP_PASSWORD`: `demo1234` on the public demo
+- `LLM_PROVIDER=groq`, `LLM_API_KEY`: without a key the static rules still run
+- `DATA_DIR=/tmp/buglens`: the function's filesystem is read-only except `/tmp`
+- `FRONTEND_URL=https://buglens.akshatgcodes.in`, `CROSS_SITE_COOKIES=false`
 
-On the frontend: `VITE_API_URL=https://<api-host>`.
+`maxDuration` is 300 seconds in `vercel.json`, because an AI review streams for up to a minute or two.
 
 ---
 

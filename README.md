@@ -16,6 +16,9 @@
 </p>
 
 <p align="center">
+  <a href="https://buglens.akshatgcodes.in">
+    <img src="https://img.shields.io/badge/live_demo-6d28d9-6d28d9?style=flat-square" alt="Live Demo">
+  </a>
   <img src="https://img.shields.io/badge/React-20232A?style=flat-square&logo=react&logoColor=61DAFB" alt="React">
   <img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript">
   <img src="https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white" alt="FastAPI">
@@ -35,6 +38,9 @@ A code reviewer built the way real review tools are: **rules first, model second
 3. **The diff view** shows the original against the suggested code, side by side or unified, with changed words highlighted. Each issue card also shows its own before/after.
 
 Reviews are saved, so you can come back to them in History.
+
+> **Live demo →** [buglens.akshatgcodes.in](https://buglens.akshatgcodes.in)
+> Log in with the demo password `demo1234`, pick a sample and press **Review**.
 
 ---
 

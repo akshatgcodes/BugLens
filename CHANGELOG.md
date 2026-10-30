@@ -6,6 +6,10 @@ All notable changes to **BugLens** are documented here.
 
 ## [Unreleased]
 
+### ✨ Added
+- Product page at `/` and the app at `/app/`, served together from one host
+- Deployed on Vercel: the landing page and app as static builds, the API as a Python function, Neon Postgres
+
 ---
 
 ## [0.1.0] — 2026-10-30
