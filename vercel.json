@@ -1,0 +1,72 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "ignoreCommand": "case \"$VERCEL_GIT_COMMIT_REF\" in dependabot/*) exit 0;; *) exit 1;; esac",
+  "builds": [
+    {
+      "src": "index.py",
+      "use": "@vercel/python",
+      "config": {
+        "maxDuration": 300
+      }
+    },
+    {
+      "src": "landing/package.json",
+      "use": "@vercel/static-build",
+      "config": {
+        "distDir": "out"
+      }
+    },
+    {
+      "src": "frontend/package.json",
+      "use": "@vercel/static-build",
+      "config": {
+        "distDir": "dist"
+      }
+    }
+  ],
+  "build": {
+    "env": {
+      "VITE_BASE": "/app/"
+    }
+  },
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/index.py"
+    },
+    {
+      "src": "/health",
+      "dest": "/index.py"
+    },
+    {
+      "src": "/app",
+      "status": 308,
+      "headers": {
+        "Location": "/app/"
+      }
+    },
+    {
+      "src": "/app/assets/(.*)",
+      "dest": "/frontend/assets/$1",
+      "headers": {
+        "Cache-Control": "public, max-age=31536000, immutable"
+      }
+    },
+    {
+      "src": "/app/favicon.svg",
+      "dest": "/frontend/favicon.svg"
+    },
+    {
+      "src": "/app/(.*)",
+      "dest": "/frontend/index.html"
+    },
+    {
+      "src": "/",
+      "dest": "/landing/index.html"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/landing/$1"
+    }
+  ]
+}
